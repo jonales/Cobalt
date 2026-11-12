@@ -5,6 +5,8 @@ import com.github.auties00.cobalt.telemetry.log.LogRedactable;
 import com.github.auties00.cobalt.wire.linked.device.identity.ADVSignedDeviceIdentity;
 import com.github.auties00.cobalt.wire.core.jid.Jid;
 import com.github.auties00.cobalt.store.linked.LinkedWhatsAppAccountStore;
+import com.github.auties00.cobalt.store.linked.LinkedWhatsAppContactStore;
+import com.github.auties00.cobalt.wire.core.jid.JidServer;
 import com.github.auties00.cobalt.store.linked.LinkedWhatsAppSignalStore;
 import com.github.auties00.cobalt.store.linked.LinkedWhatsAppStore;
 import com.github.auties00.cobalt.wire.core.util.DataUtils;
@@ -192,6 +194,9 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
      */
     private LinkedWhatsAppAccountStore account;
 
+    /** Phone-to-LID table used to canonicalise peer addresses; {@code null} until wired. */
+    private LinkedWhatsAppContactStore contacts;
+
     /**
      * Constructs a Signal sub-store, defaulting any absent cryptographic material.
      *
@@ -259,6 +264,10 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
      *
      * @param account the account sub-store, never {@code null}
      */
+    void setContacts(LinkedWhatsAppContactStore contacts) {
+        this.contacts = Objects.requireNonNull(contacts, "contacts cannot be null");
+    }
+
     void setAccount(LinkedWhatsAppAccountStore account) {
         this.account = Objects.requireNonNull(account, "account cannot be null");
         if (Log.DEBUG) LOGGER.log(Level.DEBUG, "signal store account sub-store set");
@@ -296,7 +305,60 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
             if (Log.TRACE) LOGGER.log(Level.TRACE, "canonicalizing self address {0} to lid form", new LogRedactable.User(address.toString()));
             return new SignalProtocolAddress(selfLid.user(), address.id());
         }
-        return address;
+        return canonicalPeerAddress(address);
+    }
+
+    /**
+     * Maps a peer addressed by phone number to its LID, when the mapping is known.
+     *
+     * <p>The relay delivers messages from LID-migrated accounts as {@code from=<lid>}, so the
+     * inbound pkmsg opens the Signal session under the LID address. Without this mapping an
+     * outbound send to the same device by phone number found no session, fetched a fresh
+     * prekey bundle and sent a new pkmsg every time: the peer saw the device's session reset
+     * on each message, never stabilised on {@code msg}, and WhatsApp Web flagged the contact
+     * with "couldn't verify security code". WA Web and whatsmeow keep one session per device,
+     * keyed by the LID.
+     */
+    private SignalProtocolAddress canonicalPeerAddress(SignalProtocolAddress address) {
+        if (contacts == null || !isDigits(address.name())) {
+            return address;
+        }
+        return contacts.findLidByPhone(Jid.of(address.name(), JidServer.user()))
+                .filter(lid -> lid.hasLidServer() && !lid.user().equals(address.name()))
+                .map(lid -> new SignalProtocolAddress(lid.user(), address.id()))
+                .orElse(address);
+    }
+
+    private static boolean isDigits(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        for (var i = 0; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Reads a record under the canonical address, moving one written under the raw (phone)
+     * address before the LID mapping was known. A record already under the canonical address
+     * wins: it is the one the peer is using.
+     */
+    private <V> V findCanonical(java.util.Map<SignalProtocolAddress, V> map, SignalProtocolAddress address) {
+        var canonical = canonicalAddress(address);
+        var value = map.get(canonical);
+        if (value != null || canonical.equals(address)) {
+            return value;
+        }
+        var legacy = map.remove(address);
+        if (legacy != null) {
+            if (Log.DEBUG) LOGGER.log(Level.DEBUG, "migrating signal record {0} to lid address", new LogRedactable.User(address.toString()));
+            var previous = map.putIfAbsent(canonical, legacy);
+            return previous != null ? previous : legacy;
+        }
+        return null;
     }
 
     /**
@@ -521,7 +583,7 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
 
     @Override
     public Optional<SignalSessionRecord> findSessionByAddress(SignalProtocolAddress address) {
-        return Optional.ofNullable(sessionsMap.get(canonicalAddress(address)));
+        return Optional.ofNullable(findCanonical(sessionsMap, address));
     }
 
     @Override
@@ -544,7 +606,8 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
     @Override
     public boolean removeSession(SignalProtocolAddress address) {
         if (Log.DEBUG) LOGGER.log(Level.DEBUG, "removing signal session for {0}", new LogRedactable.User(address.toString()));
-        return sessionsMap.remove(canonicalAddress(address)) != null;
+        var removedLegacy = !canonicalAddress(address).equals(address) && sessionsMap.remove(address) != null;
+        return sessionsMap.remove(canonicalAddress(address)) != null || removedLegacy;
     }
 
     @Override
@@ -766,7 +829,7 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
             if (Log.TRACE) LOGGER.log(Level.TRACE, "resolved identity for {0} as local account identity", new LogRedactable.User(canonical.toString()));
             return Optional.of(identityKeyPair.publicKey());
         }
-        return Optional.ofNullable(remoteIdentitiesMap.get(canonical));
+        return Optional.ofNullable(findCanonical(remoteIdentitiesMap, address));
     }
 
     @Override
