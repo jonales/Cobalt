@@ -852,7 +852,7 @@ public final class LiveDeviceService implements DeviceService {
                                 newTimestamp = Instant.now().minusSeconds(pastSeconds);
                             }
                         } else {
-                            newTimestamp = Instant.now();
+                            newTimestamp = syncedListTimestamp(newList);
                         }
                         if (DeviceExpectedTsUtils.shouldClearExpectedTimestamp(newTimestamp, finalExpectedTs, cachedList.orElse(null), lastADVCheckTime)) {
                             finalExpectedTs = null;
@@ -1734,7 +1734,24 @@ public final class LiveDeviceService implements DeviceService {
         store.accountStore().updateAdvCheckTime();
     }
 
-    /**
+        /**
+     * Returns the timestamp to store for a device list fetched with a signed key index list.
+     *
+     * <p>WA Web ({@code WAWebHandleAdvKeyIndexResultApi}) stores the {@code timestamp} decoded from
+     * the signed key index list, which must equal the {@code ts} of the {@code <key-index-list>}.
+     * That value goes out as {@code senderTimestamp}/{@code recipientTimestamp} in the ICDC
+     * metadata; storing the fetch time instead tells every recipient that the sender's device list
+     * is newer than the signed list they can fetch.
+     *
+     * @param newList the parsed device list
+     * @return the signed timestamp, or the current time when the list carries none
+     */
+    static Instant syncedListTimestamp(DeviceList newList) {
+        var signed = newList.timestamp();
+        return signed != null ? signed : Instant.now();
+    }
+
+/**
      * Builds a fallback {@link DeviceList} containing only the user's primary device
      * ({@link DeviceConstants#PRIMARY_DEVICE_ID}).
      *
