@@ -488,7 +488,28 @@ public final class DeviceUSyncResponseParser {
         return Stream.of(new KeyIndexEntry(jid.get().device(), keyIndex.getAsInt()));
     }
 
-    /**
+        /**
+     * Returns the key index of a {@code <device-list><device/>} entry.
+     *
+     * <p>WA Web ({@code WAWebUsyncDevice}) reads {@code key-index} from each {@code <device>} of the
+     * {@code <device-list>}; the {@code <key-index-list>} carries only {@code ts}, {@code expected_ts}
+     * and the signed bytes. The {@code keyIndexMap} is kept as a fallback for stanzas that list
+     * indexes under {@code <key-index-list>}; a device with neither (the primary) gets {@code 0}.
+     *
+     * @param deviceStanza the {@code <device>} child of the {@code <device-list>}
+     * @param keyIndexMap  key indexes listed under {@code <key-index-list>}, by device id
+     * @param deviceId     the device id
+     * @return the key index of the device
+     */
+    static int resolveKeyIndex(Stanza deviceStanza, Map<Integer, Integer> keyIndexMap, int deviceId) {
+        var attribute = deviceStanza.getAttributeAsInt("key-index");
+        if (attribute.isPresent()) {
+            return attribute.getAsInt();
+        }
+        return keyIndexMap.getOrDefault(deviceId, 0);
+    }
+
+/**
      * Converts a single {@code <device-list><device/>} entry to a typed {@link DeviceInfo}.
      *
      * <p>This is the inner worker for {@link #parseFullResult(Jid, String, Stanza, Stanza, byte[])}; it
@@ -524,7 +545,7 @@ public final class DeviceUSyncResponseParser {
         }
 
         var deviceId = id.getAsInt();
-        var keyIndex = keyIndexMap.getOrDefault(deviceId, 0);
+        var keyIndex = resolveKeyIndex(deviceStanza, keyIndexMap, deviceId);
 
         if (validIndexes != null && !validIndexes.isEmpty() && keyIndex != 0 && !validIndexes.contains(keyIndex)) {
             if (Log.WARNING) {
