@@ -329,6 +329,17 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
                 .orElse(address);
     }
 
+    /** Removes the record kept under the phone address paired with this LID address, if any. */
+    private <V> V removePhoneRecordForLid(java.util.Map<SignalProtocolAddress, V> map, SignalProtocolAddress lidAddress) {
+        if (contacts == null || !isDigits(lidAddress.name())) {
+            return null;
+        }
+        return contacts.findPhoneByLid(Jid.of(lidAddress.name(), JidServer.lid()))
+                .filter(phone -> !phone.user().equals(lidAddress.name()))
+                .map(phone -> map.remove(new SignalProtocolAddress(phone.user(), lidAddress.id())))
+                .orElse(null);
+    }
+
     private static boolean isDigits(String value) {
         if (value == null || value.isEmpty()) {
             return false;
@@ -349,10 +360,23 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
     private <V> V findCanonical(java.util.Map<SignalProtocolAddress, V> map, SignalProtocolAddress address) {
         var canonical = canonicalAddress(address);
         var value = map.get(canonical);
-        if (value != null || canonical.equals(address)) {
+        if (value != null) {
             return value;
         }
+        if (canonical.equals(address)) {
+            // Looked up by LID: the record may still sit under the phone address it was opened with
+            var moved = removePhoneRecordForLid(map, canonical);
+            if (moved != null) {
+                if (Log.DEBUG) LOGGER.log(Level.DEBUG, "migrating signal record for {0} from phone to lid address", new LogRedactable.User(address.toString()));
+                var previous = map.putIfAbsent(canonical, moved);
+                return previous != null ? previous : moved;
+            }
+            return null;
+        }
         var legacy = map.remove(address);
+        if (legacy == null) {
+            legacy = removePhoneRecordForLid(map, canonical);
+        }
         if (legacy != null) {
             if (Log.DEBUG) LOGGER.log(Level.DEBUG, "migrating signal record {0} to lid address", new LogRedactable.User(address.toString()));
             var previous = map.putIfAbsent(canonical, legacy);

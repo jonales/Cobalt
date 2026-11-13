@@ -607,6 +607,7 @@ final class ChatMessageReceiver extends MessageReceiver<ChatMessageInfo> {
     @WhatsAppWebExport(moduleName = "WAWebMsgProcessingDecryptApi", exports = "decryptE2EPayload",
             adaptation = WhatsAppAdaptation.DIRECT)
     private byte[] decryptPayloads(MessageReceiveStanza stanza) {
+        learnSenderLidMapping(stanza);
         byte[] plaintext = null;
 
         for (var enc : stanza.encs()) {
@@ -720,6 +721,32 @@ final class ChatMessageReceiver extends MessageReceiver<ChatMessageInfo> {
      */
     @WhatsAppWebExport(moduleName = "WAWebMsgProcessingDecryptEnc", exports = "decryptEnc",
             adaptation = WhatsAppAdaptation.DIRECT)
+    /**
+     * Records the LID/phone pair the relay sends with a LID-addressed message ({@code sender_pn},
+     * or {@code participant_pn} in groups) before decrypting it.
+     *
+     * <p>The Signal store keys a peer's session by its LID when the pair is known. A session this
+     * client opened by phone number (an outbound pkmsg) is found from the LID only once the pair
+     * is registered; without it the reply addressed by LID found no session, failed to decrypt
+     * and triggered a retry receipt. whatsmeow stores the same pair on every message.
+     */
+    private void learnSenderLidMapping(MessageReceiveStanza stanza) {
+        try {
+            var sender = resolveSignalSender(stanza);
+            if (!sender.hasLidServer()) {
+                return;
+            }
+            var chatJid = stanza.chatJid();
+            var phone = chatJid.hasGroupOrCommunityServer() || chatJid.hasBroadcastServer()
+                    ? stanza.participantPn()
+                    : stanza.senderPn();
+            phone.filter(Jid::hasUserServer)
+                    .ifPresent(pn -> store.contactStore().registerLidMapping(pn.toUserJid(), sender.toUserJid()));
+        } catch (RuntimeException e) {
+            if (Log.DEBUG) LOGGER.log(Level.DEBUG, "could not record lid mapping for {0}: {1}", stanza.id(), e.getMessage());
+        }
+    }
+
     private Jid resolveSignalSender(MessageReceiveStanza stanza) {
         var chatJid = stanza.chatJid();
         if (chatJid.hasGroupOrCommunityServer() || chatJid.hasBroadcastServer()) {
