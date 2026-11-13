@@ -41,7 +41,7 @@ public final class JpegCleaner {
     /**
      * Length in bytes of the synthetic JFIF APP0 header emitted before any retained segment.
      */
-    private static final int JFIF_HEADER_LENGTH = 18;
+    private static final int JFIF_HEADER_LENGTH = 20;
 
     /**
      * Number of bytes a marker takes on the wire.
@@ -233,7 +233,9 @@ public final class JpegCleaner {
             throw new WhatsAppMediaException.Processing("SOI marker not at the start of the file");
         }
         var currentMarker = -1;
-        while (input.hasRemaining()) {
+        // A marker the SOS scan already consumed is still pending even with no bytes left: the
+        // EOI (FF D9) normally closes the file right after the scan data.
+        while (input.hasRemaining() || currentMarker >= 0) {
             if (currentMarker < 0) {
                 var prefix = readUnsigned8(input);
                 if (prefix != MARKER_PREFIX) {
@@ -360,10 +362,13 @@ public final class JpegCleaner {
             throw new WhatsAppMediaException.Processing("No EOI tag found");
         }
         var jfifPrefix = buildJfifPrefix(props);
+        // toByteArray() hands back the backing array, which is sized for the whole source: copy
+        // only the bytes written, or the JPEG carries the unused capacity as trailing zeros
         var body = output.toByteArray();
-        var result = new byte[jfifPrefix.length + body.length];
+        var bodyLength = output.size();
+        var result = new byte[jfifPrefix.length + bodyLength];
         System.arraycopy(jfifPrefix, 0, result, 0, jfifPrefix.length);
-        System.arraycopy(body, 0, result, jfifPrefix.length, body.length);
+        System.arraycopy(body, 0, result, jfifPrefix.length, bodyLength);
         if (Log.DEBUG) LOGGER.log(Level.DEBUG, "jpeg cleaned: outputBytes={0}", result.length);
         return result;
     }
@@ -442,6 +447,10 @@ public final class JpegCleaner {
         buf.put((byte) props.densityUnits);
         buf.putShort((short) props.xDensity);
         buf.putShort((short) props.yDensity);
+        // Xthumbnail and Ythumbnail (no embedded thumbnail): the APP0 length above counts them,
+        // and without them a decoder reads the next marker's first two bytes as these fields
+        buf.put((byte) 0);
+        buf.put((byte) 0);
         return prefix;
     }
 

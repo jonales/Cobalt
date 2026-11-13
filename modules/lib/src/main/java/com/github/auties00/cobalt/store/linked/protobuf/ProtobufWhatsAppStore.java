@@ -161,6 +161,7 @@ public abstract class ProtobufWhatsAppStore implements LinkedWhatsAppStore {
         this.connectionStore = new ProtobufLinkedWhatsAppConnectionStore();
         this.signalStore.setAccount(accountStore);
         this.contactStore.setAccount(accountStore);
+        this.signalStore.setContacts(contactStore);
         chatStore.setContacts(contactStore);
         this.listeners = ConcurrentHashMap.newKeySet();
         this.logger = Log.get(this.getClass());

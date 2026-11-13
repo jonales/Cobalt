@@ -434,7 +434,7 @@ public final class AckBuilder {
             return participantOverride;
         }
         return switch (ackClass) {
-            case MESSAGE -> inbound.getAttributeAsJid("participant").orElse(null);
+            case MESSAGE, STATUS -> inbound.getAttributeAsJid("participant").orElse(null);
             case RECEIPT -> {
                 var inherited = inbound.getAttributeAsJid("participant").orElse(null);
                 yield inherited != null && !Objects.equals(inherited, to) ? inherited : null;

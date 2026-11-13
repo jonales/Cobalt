@@ -183,6 +183,84 @@ public final class ImagePipeline {
                 ? QSCALE_HD
                 : QSCALE_STANDARD;
         if (Log.DEBUG) LOGGER.log(Level.DEBUG, "image transcode start: quality={0}", quality);
+        try {
+            return runWithFfmpeg(provider, source, maxEdge, qscale);
+        } catch (WhatsAppMediaException.Processing | IllegalStateException ffmpegFailure) {
+            // The bundled native build ships no image pipe demuxers (png_pipe, jpeg_pipe,
+            // image2pipe), so a still image read from a channel fails to open. The JDK decodes
+            // JPEG, PNG, GIF and BMP on its own.
+            var fallback = runWithImageIo(provider, source, maxEdge, quality);
+            if (fallback != null) {
+                if (Log.DEBUG) LOGGER.log(Level.DEBUG, "image transcoded with ImageIO after ffmpeg failed: {0}", ffmpegFailure.getMessage());
+                return fallback;
+            }
+            if (Log.ERROR) LOGGER.log(Level.ERROR, "image transcode failed", ffmpegFailure);
+            throw ffmpegFailure;
+        }
+    }
+
+    /** Scales the source with ImageIO and Java2D; {@code null} when the JDK cannot decode it. */
+    private static MediaPayload runWithImageIo(MediaProvider provider, SeekableByteChannel source, int maxEdge,
+                                               SettingsSyncAction.MediaQualitySetting quality)
+            throws WhatsAppMediaException.Processing {
+        java.awt.image.BufferedImage image;
+        try {
+            source.position(0);
+            image = javax.imageio.ImageIO.read(java.nio.channels.Channels.newInputStream(source));
+        } catch (java.io.IOException | RuntimeException e) {
+            return null;
+        }
+        if (image == null) {
+            return null;
+        }
+        var mainDims = boundEdge(image.getWidth(), image.getHeight(), maxEdge);
+        var thumbDims = boundEdge(image.getWidth(), image.getHeight(), THUMB_MAX_EDGE);
+        var mainQuality = quality == SettingsSyncAction.MediaQualitySetting.HD ? 0.92f : 0.82f;
+        var mainJpeg = JpegCleaner.clean(writeJpeg(image, mainDims, mainQuality));
+        var thumbnail = writeJpeg(image, thumbDims, 0.6f);
+        provider.setMediaSize(mainJpeg.length);
+        if (provider instanceof ImageMessage message) {
+            message.setMimetype("image/jpeg");
+            message.setWidth(mainDims.width);
+            message.setHeight(mainDims.height);
+            message.setJpegThumbnail(thumbnail);
+        }
+        return new MediaPayload.OfBytes(mainJpeg);
+    }
+
+    /** Draws the image on an opaque RGB canvas (JPEG has no alpha: white background) and encodes it. */
+    private static byte[] writeJpeg(java.awt.image.BufferedImage image, Dimensions dims, float quality)
+            throws WhatsAppMediaException.Processing {
+        var canvas = new java.awt.image.BufferedImage(dims.width, dims.height, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        var graphics = canvas.createGraphics();
+        try {
+            graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                    java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            graphics.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY);
+            graphics.setColor(java.awt.Color.WHITE);
+            graphics.fillRect(0, 0, dims.width, dims.height);
+            graphics.drawImage(image, 0, 0, dims.width, dims.height, null);
+        } finally {
+            graphics.dispose();
+        }
+        var writer = javax.imageio.ImageIO.getImageWritersByFormatName("jpeg").next();
+        var out = new java.io.ByteArrayOutputStream();
+        try (var stream = javax.imageio.ImageIO.createImageOutputStream(out)) {
+            writer.setOutput(stream);
+            var params = writer.getDefaultWriteParam();
+            params.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+            params.setCompressionQuality(quality);
+            writer.write(null, new javax.imageio.IIOImage(canvas, null, null), params);
+        } catch (java.io.IOException e) {
+            throw new WhatsAppMediaException.Processing("jpeg encoding failed", e);
+        } finally {
+            writer.dispose();
+        }
+        return out.toByteArray();
+    }
+
+    private static MediaPayload runWithFfmpeg(MediaProvider provider, SeekableByteChannel source, int maxEdge,
+                                              int qscale) throws WhatsAppMediaException.Processing {
         try (var arena = Arena.ofShared();
              var decoded = decodeFirstFrame(arena, source)) {
             var orientation = readOrientation(decoded.stream);
@@ -217,9 +295,6 @@ public final class ImagePipeline {
                         mainDims.width, mainDims.height, mainJpeg.length, thumbnail.length, orientation);
             }
             return new MediaPayload.OfBytes(mainJpeg);
-        } catch (WhatsAppMediaException.Processing e) {
-            if (Log.ERROR) LOGGER.log(Level.ERROR, "image transcode failed", e);
-            throw e;
         }
     }
 
@@ -552,11 +627,15 @@ public final class ImagePipeline {
             AVFormatContext.pb(formatCtx, bridge.ioContext());
             var formatPp = arena.allocate(ValueLayout.ADDRESS);
             formatPp.set(ValueLayout.ADDRESS, 0L, formatCtx);
-            FFmpegError.check("avformat_open_input",
-                    Ffmpeg.avformat_open_input(formatPp, MemorySegment.NULL,
-                            MemorySegment.NULL, MemorySegment.NULL));
-            formatCtx = formatPp.get(ValueLayout.ADDRESS, 0L)
-                    .reinterpret(AVFormatContext.layout().byteSize());
+            var openCode = Ffmpeg.avformat_open_input(formatPp, MemorySegment.NULL,
+                            MemorySegment.NULL, MemorySegment.NULL);
+            // On failure avformat_open_input frees the context and nulls the pointer. Read it back
+            // before checking, or the cleanup path closes the freed context again (SIGSEGV).
+            var opened = formatPp.get(ValueLayout.ADDRESS, 0L);
+            formatCtx = opened.address() == 0L
+                    ? MemorySegment.NULL
+                    : opened.reinterpret(AVFormatContext.layout().byteSize());
+            FFmpegError.check("avformat_open_input", openCode);
             FFmpegError.check("avformat_find_stream_info",
                     Ffmpeg.avformat_find_stream_info(formatCtx, MemorySegment.NULL));
             var streamIndex = pickVideoStream(formatCtx);

@@ -70,7 +70,14 @@ public enum AckClass {
      */
     @WhatsAppWebExport(moduleName = "WAWebHandleVoipCall", exports = "handleCall",
             adaptation = WhatsAppAdaptation.ADAPTED)
-    CALL("call");
+    CALL("call"),
+
+    /**
+     * The {@code status} stanza class: status updates from contacts ({@code status@broadcast}) and
+     * newsletter statuses. Each one must be acknowledged like any other stanza, or the relay stops
+     * draining the offline queue and holds every live message behind it.
+     */
+    STATUS("status");
 
     /**
      * The on-wire string written verbatim into the {@code class} attribute.
@@ -120,6 +127,7 @@ public enum AckClass {
             case "receipt" -> RECEIPT;
             case "notification" -> NOTIFICATION;
             case "call" -> CALL;
+            case "status" -> STATUS;
             default -> null;
         };
     }

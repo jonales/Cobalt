@@ -1029,8 +1029,15 @@ final class LiveLinkedWhatsAppClient implements LinkedWhatsAppClient {
         this.passkeyAuthenticator = webVerificationHandler == null
                 ? null
                 : webVerificationHandler.passkeyAuthenticator();
-        if ((store.accountStore().clientType() == LinkedWhatsAppClientType.WEB) == (webVerificationHandler == null)) {
+        // A registered web session (restored from disk) has nothing left to verify, so it runs
+        // without a handler: LinkedWhatsAppClientBuilder.Options.Web.registered() passes null.
+        // Only an unregistered web client needs one, and a mobile client must never get one.
+        var web = store.accountStore().clientType() == LinkedWhatsAppClientType.WEB;
+        if (web && webVerificationHandler == null && !store.accountStore().registered()) {
             throw new IllegalArgumentException("webVerificationHandler cannot be null when client type is WEB");
+        }
+        if (!web && webVerificationHandler != null) {
+            throw new IllegalArgumentException("webVerificationHandler must be null when client type is MOBILE");
         }
         var sessionCipher = new SignalSessionCipher(store.signalStore());
         var groupCipher = new SignalGroupCipher(store.signalStore());
@@ -5153,16 +5160,19 @@ final class LiveLinkedWhatsAppClient implements LinkedWhatsAppClient {
             return Map.of();
         }
 
-        // Build a UsyncQuery anchored on the contact protocol with background context, mirroring
+        // On-demand existence check: WA Web sends mode=query with the interactive context and
+        // only the phone number in <contact>. A background context (meant for address-book
+        // sync) together with a jid attribute on <user> is silently dropped by the relay: the
+        // IQ never gets a response and the caller times out.
         var query = UsyncQuery.ofContact(UsyncAddressingMode.PN)
-                .withContext(UsyncContext.BACKGROUND);
+                .withContext(UsyncContext.INTERACTIVE);
         var hasUser = false;
         for (var jid : phoneNumbers) {
             var phoneNumber = jid.toPhoneNumber().orElse(null);
             if (phoneNumber == null) {
                 continue;
             }
-            query.withUser(UsyncUser.byPhoneNumber(phoneNumber).withId(jid.toUserJid()));
+            query.withUser(UsyncUser.byPhoneNumber(phoneNumber));
             hasUser = true;
         }
         if (!hasUser) {
