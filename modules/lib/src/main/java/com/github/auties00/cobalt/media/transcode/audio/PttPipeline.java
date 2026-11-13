@@ -497,6 +497,11 @@ public final class PttPipeline {
                         "avcodec_receive_packet failed: " + FFmpegError.describe(got));
             }
             AVPacket.stream_index(packet, 0);
+            // The ogg muxer resets an Opus stream to a 1/48000 time base in avformat_write_header
+            // (RFC 7845 granule positions are always 48 kHz); without the rescale the 16 kHz
+            // encoder timestamps became granules a third of the real duration.
+            Ffmpeg.av_packet_rescale_ts(packet,
+                    AVCodecContext.time_base(encCtx), AVStream.time_base(streamPointer(fmtCtx, 0)));
             var written = Ffmpeg.av_interleaved_write_frame(fmtCtx, packet);
             Ffmpeg.av_packet_unref(packet);
             if (written < 0) {
