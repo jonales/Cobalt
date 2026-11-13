@@ -285,9 +285,10 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
      * and therefore two divergent Signal sessions: an inbound self-sent peer echo arrives
      * LID-addressed while other internal paths address the same device by phone number, so the two
      * ratchets drift and every echo fails its MAC. Rewriting the phone-number name to the LID name
-     * (preserving the device id) collapses both onto one record. The rewrite is a no-op until the
-     * account is LID-migrated (both {@link LinkedWhatsAppAccountStore#jid()} and {@link LinkedWhatsAppAccountStore#lid()} are
-     * present) and never touches a non-self address.
+     * (preserving the device id) collapses both onto one record. The self rewrite needs the
+     * account to be LID-migrated (both {@link LinkedWhatsAppAccountStore#jid()} and {@link LinkedWhatsAppAccountStore#lid()}
+     * present); a peer's phone address is rewritten to its LID whenever the contact store knows the
+     * pair (see {@link #canonicalPeerAddress(SignalProtocolAddress)}).
      *
      * @param address the address to canonicalise, or {@code null}
      * @return the canonical LID-keyed address for a self phone-number address, otherwise the input
@@ -299,7 +300,8 @@ public final class ProtobufLinkedWhatsAppSignalStore implements LinkedWhatsAppSi
         var selfPn = account.jid().orElse(null);
         var selfLid = account.lid().orElse(null);
         if (selfPn == null || selfLid == null) {
-            return address;
+            // Without the account's own LID only the self rule is skipped: peers still map by LID
+            return canonicalPeerAddress(address);
         }
         if (address.name().equals(selfPn.user()) && !address.name().equals(selfLid.user())) {
             if (Log.TRACE) LOGGER.log(Level.TRACE, "canonicalizing self address {0} to lid form", new LogRedactable.User(address.toString()));
