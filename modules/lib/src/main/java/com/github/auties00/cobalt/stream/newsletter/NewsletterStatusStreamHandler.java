@@ -53,6 +53,9 @@ public final class NewsletterStatusStreamHandler extends SocketStreamHandler.Con
      */
     private final LinkedWhatsAppClient whatsapp;
 
+    /** Acknowledges every inbound {@code status} stanza. */
+    private final com.github.auties00.cobalt.ack.AckSender ackSender;
+
     /**
      * Constructs a handler bound to the given {@link LinkedWhatsAppClient}.
      *
@@ -61,8 +64,9 @@ public final class NewsletterStatusStreamHandler extends SocketStreamHandler.Con
      *
      * @param whatsapp the owning {@link LinkedWhatsAppClient} instance
      */
-    public NewsletterStatusStreamHandler(LinkedWhatsAppClient whatsapp) {
+    public NewsletterStatusStreamHandler(LinkedWhatsAppClient whatsapp, com.github.auties00.cobalt.ack.AckSender ackSender) {
         this.whatsapp = whatsapp;
+        this.ackSender = ackSender;
     }
 
     /**
@@ -84,6 +88,21 @@ public final class NewsletterStatusStreamHandler extends SocketStreamHandler.Con
      */
     @Override
     public void handle(Stanza stanza) {
+        // Every status stanza is acknowledged, including contact statuses (status@broadcast) that
+        // this handler does not process: without the ack the relay stopped draining the offline
+        // queue and held every live message behind it.
+        try {
+            handleStatus(stanza);
+        } finally {
+            try {
+                ackSender.sendAck(com.github.auties00.cobalt.ack.AckClass.STATUS, stanza);
+            } catch (RuntimeException e) {
+                if (Log.WARNING) LOGGER.log(Level.WARNING, "failed to ack status stanza", e);
+            }
+        }
+    }
+
+    private void handleStatus(Stanza stanza) {
         var from = stanza.getAttributeAsJid("from", null);
         if (from == null || !from.hasNewsletterServer()) {
             return;

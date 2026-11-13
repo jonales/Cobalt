@@ -244,7 +244,7 @@ public final class LiveNodeStreamService implements NodeStreamService {
         addHandler(result, "failure", new FailureStreamHandler(whatsapp));
         addHandler(result, "stream:error", new StreamErrorStreamHandler(whatsapp));
         addHandler(result, "error", new ErrorStreamHandler());
-        addHandler(result, "status", new NewsletterStatusStreamHandler(whatsapp));
+        addHandler(result, "status", new NewsletterStatusStreamHandler(whatsapp, ackSender));
         addHandler(result, "xmlstreamend", new XmlStreamEndStreamHandler());
         this.handlers = Collections.unmodifiableMap(result);
     }
