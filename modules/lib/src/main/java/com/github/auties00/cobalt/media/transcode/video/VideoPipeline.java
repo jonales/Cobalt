@@ -506,11 +506,15 @@ public final class VideoPipeline {
             AVFormatContext.pb(inFmtCtx, inputBridge.ioContext());
             var formatPp = arena.allocate(ValueLayout.ADDRESS);
             formatPp.set(ValueLayout.ADDRESS, 0L, inFmtCtx);
-            FFmpegError.check("avformat_open_input",
-                    Ffmpeg.avformat_open_input(formatPp, MemorySegment.NULL,
-                            MemorySegment.NULL, MemorySegment.NULL));
-            inFmtCtx = formatPp.get(ValueLayout.ADDRESS, 0L)
-                    .reinterpret(AVFormatContext.layout().byteSize());
+            var openCode = Ffmpeg.avformat_open_input(formatPp, MemorySegment.NULL,
+                            MemorySegment.NULL, MemorySegment.NULL);
+            // On failure avformat_open_input frees the context and nulls the pointer. Read it back
+            // before checking, or the cleanup path closes the freed context again (SIGSEGV).
+            var opened = formatPp.get(ValueLayout.ADDRESS, 0L);
+            inFmtCtx = opened.address() == 0L
+                    ? MemorySegment.NULL
+                    : opened.reinterpret(AVFormatContext.layout().byteSize());
+            FFmpegError.check("avformat_open_input", openCode);
             FFmpegError.check("avformat_find_stream_info",
                     Ffmpeg.avformat_find_stream_info(inFmtCtx, MemorySegment.NULL));
             videoStreamIndex = pickStream(inFmtCtx, Ffmpeg.AVMEDIA_TYPE_VIDEO());
