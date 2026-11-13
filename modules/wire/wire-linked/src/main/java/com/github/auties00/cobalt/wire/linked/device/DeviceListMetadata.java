@@ -1,7 +1,7 @@
 package com.github.auties00.cobalt.wire.linked.device;
 
 import com.github.auties00.cobalt.wire.linked.device.identity.ADVEncryptionType;
-import com.github.auties00.cobalt.wire.core.mixin.InstantMillisMixin;
+import com.github.auties00.cobalt.wire.core.mixin.InstantSecondsMixin;
 import it.auties.protobuf.annotation.ProtobufMessage;
 import it.auties.protobuf.annotation.ProtobufProperty;
 import it.auties.protobuf.model.ProtobufType;
@@ -57,7 +57,7 @@ public final class DeviceListMetadata {
      * by the recipient to distinguish a stale hash from a fresh one when
      * resolving a device list mismatch. Optional.
      */
-    @ProtobufProperty(index = 2, type = ProtobufType.UINT64, mixins = InstantMillisMixin.class)
+    @ProtobufProperty(index = 2, type = ProtobufType.UINT64, mixins = InstantSecondsMixin.class)
     Instant senderTimestamp;
 
     /**
@@ -100,7 +100,7 @@ public final class DeviceListMetadata {
      * list. Used by the recipient together with its local timestamp to
      * decide which side holds the fresher view of the list. Optional.
      */
-    @ProtobufProperty(index = 9, type = ProtobufType.UINT64, mixins = InstantMillisMixin.class)
+    @ProtobufProperty(index = 9, type = ProtobufType.UINT64, mixins = InstantSecondsMixin.class)
     Instant recipientTimestamp;
 
     /**

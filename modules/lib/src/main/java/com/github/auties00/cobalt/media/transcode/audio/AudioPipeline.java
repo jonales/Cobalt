@@ -312,7 +312,7 @@ public final class AudioPipeline {
                                           MemorySegment encPacket, MemorySegment outFmtCtx,
                                           int frameSize)
             throws WhatsAppMediaException.Processing {
-        long encPts = 0;
+        var accumulator = new FrameAccumulator(encCtx, encFrame, encPacket, outFmtCtx, frameSize);
         var eof = false;
         while (!eof) {
             var read = Ffmpeg.av_read_frame(inFmtCtx, decPacket);
@@ -343,123 +343,122 @@ public final class AudioPipeline {
                     throw new WhatsAppMediaException.Processing(
                             "avcodec_receive_frame failed: " + FFmpegError.describe(got));
                 }
-                encPts = resampleAndEncode(arena, swr, inFrame, encCtx, encFrame,
-                        encPacket, outFmtCtx, frameSize, encPts);
+                resampleAndEncode(arena, swr, inFrame, accumulator);
                 Ffmpeg.av_frame_unref(inFrame);
             }
         }
-        encPts = drainAndEncode(arena, swr, encCtx, encFrame, encPacket, outFmtCtx,
-                frameSize, encPts);
+        drainAndEncode(arena, swr, accumulator);
         flushEncoder(encCtx, encPacket, outFmtCtx);
-        return encPts;
+        return accumulator.pts();
     }
 
     /**
-     * Pushes one decoded frame through the resampler, accumulates the
-     * resulting samples, and dispatches every full AAC frame to the
-     * encoder.
+     * Resamples one decoded frame and feeds the encoder through {@link FrameAccumulator}.
      *
-     * @param arena     the shared arena
-     * @param swr       the initialised resampler
-     * @param inFrame   the decoded source frame
-     * @param encCtx    the open encoder
-     * @param encFrame  pre-allocated encoder input frame
-     * @param encPacket reusable encoder output packet
-     * @param outFmtCtx the open output muxer
-     * @param frameSize AAC frame size in samples per channel
-     * @param encPts    the current encoder PTS
-     * @return the updated encoder PTS
-     * @throws WhatsAppMediaException.Processing if any stage fails
+     * <p>The input frame is converted exactly once; libswresample keeps any delay internally.
+     * The native AAC encoder requires every frame but the last to carry exactly
+     * {@code frame_size} samples, so the converted samples are accumulated before encoding.
      */
-    private static long resampleAndEncode(Arena arena, MemorySegment swr,
-                                            MemorySegment inFrame,
-                                            MemorySegment encCtx, MemorySegment encFrame,
-                                            MemorySegment encPacket, MemorySegment outFmtCtx,
-                                            int frameSize, long encPts)
+    private static void resampleAndEncode(Arena arena, MemorySegment swr, MemorySegment inFrame,
+                                          FrameAccumulator accumulator)
             throws WhatsAppMediaException.Processing {
-        int produced;
-        do {
-            var outBufSamples = frameSize;
-            var outChannels = AVCodecContext.ch_layout(encCtx);
-            var channels = AVChannelLayout.nb_channels(outChannels);
-            var outDataPtrs = arena.allocate((long) channels * ValueLayout.ADDRESS.byteSize());
-            for (var c = 0; c < channels; c++) {
-                var plane = arena.allocate((long) outBufSamples * Float.BYTES);
-                outDataPtrs.setAtIndex(ValueLayout.ADDRESS, c, plane);
-            }
-            produced = FFmpegError.check("swr_convert",
-                    Ffmpeg.swr_convert(swr, outDataPtrs, outBufSamples,
-                            AVFrame.extended_data(inFrame), AVFrame.nb_samples(inFrame)));
-            if (produced > 0) {
-                AVFrame.nb_samples(encFrame, produced);
-                AVFrame.pts(encFrame, encPts);
-                FFmpegError.check("av_frame_make_writable",
-                        Ffmpeg.av_frame_make_writable(encFrame));
-                for (var c = 0; c < channels; c++) {
-                    var dstPlane = AVFrame.data(encFrame).getAtIndex(ValueLayout.ADDRESS, c);
-                    var srcPlane = outDataPtrs.getAtIndex(ValueLayout.ADDRESS, c)
-                            .reinterpret((long) produced * Float.BYTES);
-                    MemorySegment.copy(srcPlane, 0L,
-                            dstPlane.reinterpret((long) produced * Float.BYTES), 0L,
-                            (long) produced * Float.BYTES);
-                }
-                encPts += produced;
-                pushFrameAndDrain(encCtx, encFrame, encPacket, outFmtCtx);
-            }
-        } while (produced > 0);
-        return encPts;
+        var inSamples = AVFrame.nb_samples(inFrame);
+        var inRate = Math.max(1, AVFrame.sample_rate(inFrame));
+        var capacity = (int) ((long) inSamples * OUTPUT_SAMPLE_RATE / inRate) + accumulator.frameSize + 256;
+        var out = accumulator.allocateOutput(arena, capacity);
+        var produced = FFmpegError.check("swr_convert",
+                Ffmpeg.swr_convert(swr, out, capacity, AVFrame.extended_data(inFrame), inSamples));
+        accumulator.push(out, produced);
     }
 
     /**
-     * Drains the resampler at end-of-input and encodes the trailing
-     * samples.
-     *
-     * @param arena     the shared arena
-     * @param swr       the resampler
-     * @param encCtx    the encoder
-     * @param encFrame  reusable encoder input frame
-     * @param encPacket reusable encoder output packet
-     * @param outFmtCtx the muxer
-     * @param frameSize AAC frame size
-     * @param encPts    current encoder PTS
-     * @return the updated encoder PTS
-     * @throws WhatsAppMediaException.Processing if any stage fails
+     * Drains libswresample, then encodes whatever is left as the final (possibly short) frame.
      */
-    private static long drainAndEncode(Arena arena, MemorySegment swr,
-                                         MemorySegment encCtx, MemorySegment encFrame,
-                                         MemorySegment encPacket, MemorySegment outFmtCtx,
-                                         int frameSize, long encPts)
+    private static void drainAndEncode(Arena arena, MemorySegment swr, FrameAccumulator accumulator)
             throws WhatsAppMediaException.Processing {
+        var capacity = accumulator.frameSize + 256;
+        var out = accumulator.allocateOutput(arena, capacity);
         int produced;
         do {
-            var outBufSamples = frameSize;
-            var channels = AVChannelLayout.nb_channels(AVCodecContext.ch_layout(encCtx));
-            var outDataPtrs = arena.allocate((long) channels * ValueLayout.ADDRESS.byteSize());
-            for (var c = 0; c < channels; c++) {
-                var plane = arena.allocate((long) outBufSamples * Float.BYTES);
-                outDataPtrs.setAtIndex(ValueLayout.ADDRESS, c, plane);
-            }
             produced = FFmpegError.check("swr_convert(flush)",
-                    Ffmpeg.swr_convert(swr, outDataPtrs, outBufSamples,
-                            MemorySegment.NULL, 0));
-            if (produced > 0) {
-                AVFrame.nb_samples(encFrame, produced);
-                AVFrame.pts(encFrame, encPts);
-                FFmpegError.check("av_frame_make_writable",
-                        Ffmpeg.av_frame_make_writable(encFrame));
-                for (var c = 0; c < channels; c++) {
-                    var dstPlane = AVFrame.data(encFrame).getAtIndex(ValueLayout.ADDRESS, c);
-                    var srcPlane = outDataPtrs.getAtIndex(ValueLayout.ADDRESS, c)
-                            .reinterpret((long) produced * Float.BYTES);
-                    MemorySegment.copy(srcPlane, 0L,
-                            dstPlane.reinterpret((long) produced * Float.BYTES), 0L,
-                            (long) produced * Float.BYTES);
-                }
-                encPts += produced;
-                pushFrameAndDrain(encCtx, encFrame, encPacket, outFmtCtx);
-            }
+                    Ffmpeg.swr_convert(swr, out, capacity, MemorySegment.NULL, 0));
+            accumulator.push(out, produced);
         } while (produced > 0);
-        return encPts;
+        accumulator.finish();
+    }
+
+    /**
+     * Fills the encoder frame with exactly {@code frameSize} samples per channel before each
+     * {@code avcodec_send_frame}; only {@link #finish()} may send a shorter, final frame.
+     */
+    private static final class FrameAccumulator {
+        private final MemorySegment encCtx;
+        private final MemorySegment encFrame;
+        private final MemorySegment encPacket;
+        private final MemorySegment outFmtCtx;
+        private final int frameSize;
+        private final int channels;
+        private long pts;
+        private int filled;
+
+        FrameAccumulator(MemorySegment encCtx, MemorySegment encFrame, MemorySegment encPacket,
+                         MemorySegment outFmtCtx, int frameSize) {
+            this.encCtx = encCtx;
+            this.encFrame = encFrame;
+            this.encPacket = encPacket;
+            this.outFmtCtx = outFmtCtx;
+            this.frameSize = frameSize;
+            this.channels = AVChannelLayout.nb_channels(AVCodecContext.ch_layout(encCtx));
+        }
+
+        long pts() {
+            return pts;
+        }
+
+        MemorySegment allocateOutput(Arena arena, int capacity) {
+            var planes = arena.allocate((long) channels * ValueLayout.ADDRESS.byteSize());
+            for (var c = 0; c < channels; c++) {
+                planes.setAtIndex(ValueLayout.ADDRESS, c, arena.allocate((long) capacity * Float.BYTES));
+            }
+            return planes;
+        }
+
+        void push(MemorySegment planes, int count) throws WhatsAppMediaException.Processing {
+            var offset = 0;
+            while (offset < count) {
+                if (filled == 0) {
+                    FFmpegError.check("av_frame_make_writable", Ffmpeg.av_frame_make_writable(encFrame));
+                }
+                var take = Math.min(frameSize - filled, count - offset);
+                for (var c = 0; c < channels; c++) {
+                    var src = planes.getAtIndex(ValueLayout.ADDRESS, c)
+                            .reinterpret((long) (offset + take) * Float.BYTES);
+                    var dst = AVFrame.data(encFrame).getAtIndex(ValueLayout.ADDRESS, c)
+                            .reinterpret((long) frameSize * Float.BYTES);
+                    MemorySegment.copy(src, (long) offset * Float.BYTES,
+                            dst, (long) filled * Float.BYTES, (long) take * Float.BYTES);
+                }
+                filled += take;
+                offset += take;
+                if (filled == frameSize) {
+                    send(frameSize);
+                }
+            }
+        }
+
+        void finish() throws WhatsAppMediaException.Processing {
+            if (filled > 0) {
+                send(filled);
+            }
+        }
+
+        private void send(int samples) throws WhatsAppMediaException.Processing {
+            AVFrame.nb_samples(encFrame, samples);
+            AVFrame.pts(encFrame, pts);
+            pushFrameAndDrain(encCtx, encFrame, encPacket, outFmtCtx);
+            pts += samples;
+            filled = 0;
+        }
     }
 
     /**
